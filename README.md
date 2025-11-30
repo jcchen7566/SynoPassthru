@@ -1,30 +1,44 @@
 # SynoPassthru
+
 Many thanks to [@sramshaw](https://github.com/sramshaw) for the great ideas that inspired this fork.
 
 Synology VMM is based on KVM, but it does not allow users to edit the config file manually. The only way (as I know) to passthrough a PCI device is by using "virsh attach-device", which is quite inconvenient since you have to do it every time you restart your virtual machine. Besides, some PCI devices must be attached at the very begining of the VM, manually attaching it may not always be successful.
 
 Thus, SynoPassthru is a useful script that can automatically pass through PCI devices to a VMM virtual machine during boot-up.
 
-## How To
-#### 1. IOMMU support check
+## Architecture
+The automation is achieved through a `qemu` hook that is triggered when a VM starts.
+1.  **`deploy.sh`**: This is the main installation script. It copies all necessary scripts to `/usr/local/libvirt` and injects a hook into the Synology VMM startup sequence.
+2.  **QEMU Hook**: The hook is a script located at `/etc/libvirt/hooks/qemu`. When any VM starts, this hook is executed by `libvirtd`.
+3.  **`attach_detach_all.sh`**: The QEMU hook script calls this master script, passing the VM name as an argument.
+4.  **User Scripts**: `attach_detach_all.sh` then executes the user-created scripts located in `/usr/local/libvirt/user/`.
+5.  **`attach_detach_pci_from_vm.sh`**: Each user script calls this core script, which contains the logic to unbind the PCI device from the host and attach it to the specified guest VM using `virsh`.
 
-First, you need to verify if passthrough is supported on your platform. 
+## Properties
+The following properties are used in the user-configurable scripts (`scripts/user/*.sh`) to define which device is passed through to which VM.
+
+| Property  | Type     | Description                                                                                                                               |
+|-----------|----------|-------------------------------------------------------------------------------------------------------------------------------------------|
+| `ADDRESS`   | `String` | The PCI address of the device to passthrough (e.g., "08:00.0"). Found using `lspci`.                                                      |
+| `VENDOR`    | `String` | The vendor ID of the PCI device. Found using `lspci -n`.                                                                                  |
+| `PRODUCT`   | `String` | The product ID of the PCI device. Found using `lspci -n`.                                                                                 |
+| `VM_NAME`   | `String` | The name of the target VM. **Must** be the name shown by `virsh list --all`, which can differ from the name in the Synology VMM UI.       |
+| `ROM`       | `String` | (Optional) The absolute path to a vBIOS ROM file for the device. This is often required for GPU passthrough. See Appendix for details.    |
+
+## How to Use
+
+#### 1. IOMMU Check
+Ensure your hardware supports IOMMU and the target PCI device is in its own IOMMU group.
+```bash
+# Check for IOMMU support
+dmesg | grep IOMMU
+
+# Check IOMMU groups
+./utils/iommu.sh
 ```
-root@DSM7:~# dmesg | grep IOMMU
-[   29.046464] pci 0000:00:00.2: AMD-Vi: IOMMU performance counters supported
-[   31.780077] pci 0000:00:00.2: AMD-Vi: Found IOMMU cap 0x40
-[   32.800487] perf/amd_iommu: Detected AMD IOMMU #0 (2 banks, 4 counters/bank).
-[   33.636767] AMD-Vi: AMD IOMMUv2 driver by Joerg Roedel <jroedel@suse.de>
+
+Here is the well-separated IOMMU example
 ```
-As shown in the example above, dmesg should display the IOMMU keyword, and the driver must be loaded without any error.  
-_(Tips: If you're using XPEnology, switch to the SA6400 machine for better virtualization support)_
-
-
-#### 2. IOMMU group check
-
-The PCI device you want to passthrough must be in its own separate IOMMU group. You can use [iommu.sh](https://github.com/jcchen7566/SynoPassthru/blob/main/utils/iommu.sh) to check:
-```
-root@DSM7:~# ./iommu.sh
 IOMMU Group 17
         08:00.4 USB controller [0c03]: Advanced Micro Devices, Inc. [AMD] Renoir/Cezanne USB 3.1 [1022:1639]
 IOMMU Group 7
@@ -83,21 +97,80 @@ IOMMU Group 9
         00:18.6 Host bridge [0600]: Advanced Micro Devices, Inc. [AMD] Cezanne Data Fabric; Function 6 [1022:1670]
         00:18.7 Host bridge [0600]: Advanced Micro Devices, Inc. [AMD] Cezanne Data Fabric; Function 7 [1022:1671]
 ```
-As shown above, I can passthrough "08:00.0 VGA compatible controller" because it is in its own IOMMU group. However, "05:00.0 Ethernet controller" cannot be passed through unless all devices in IOMMU Group 11 are passed through together.  
 
-#### (Option) 3. IOMMU group aren't well-separated
-You can try enabling the **ACS option** in the BIOS, this usually resolves the issue.  
-  
-But if you're using an AMD Zen 3 CPU with an older chipset (e.g. B350 or B450 motherboard), you may encounter an issue:  
-_**The ACS option may be deprecated for newer CPUs due to BIOS storage limitations**_  
-AM4 motherboards support up to five generations of CPUs (AMD YES!). To make this possible, some rarely used features had to be sacrificed. So if you unfortunately find that the ACS option is missing, downgrading the BIOS may help.  
+#### 2. Configure User Scripts
+For each PCI device you want to passthrough, create a `.sh` file in the `scripts/user/` directory. You can copy an example and edit the properties.
+```bash
+# Example: scripts/user/attach_my_gpu.sh
 
-Take me for example — I'm using AMD Ryzen 3 5350GE with an ASRock B450M Pro4 motherboard, and there's no ACS option in the BIOS. After doing some research online, I found this thread: https://www.reddit.com/r/ASRock/comments/pfza16/deskmini_x300_bios_with_acs_enable/  
-It mentioned that there's a BIOS version for Asrock B450F which supports well-separated IOMMU groups! After trying B450M BIOS with the same **AGESA version(1.2.0.6b)**, it works as well!  
-_(Note: This BIOS version still doesn't include the ACS option, but it enables well-separated groups using the PCI ARI option instead.)_  
+#!/bin/bash
+ADDRESS="08:00.0"
+VENDOR="1002"
+PRODUCT="1638"
+ROM="/usr/local/libvirt/user/vbios_1002_1638.bin"
+VM_NAME="my-vm-name-from-virsh"
+export VM_NAME
+
+if [ "$TARGET_VM" == "$VM_NAME" ]; then
+    /usr/local/libvirt/attach_detach_pci_from_vm.sh "ATTACH" "$ADDRESS" "$VENDOR" "$PRODUCT" "$ROM"
+fi
+```
+
+#### 3. Update Master Script
+**This is a crucial step.** Edit `scripts/attach_detach_all.sh` to call the user scripts you created.
+```bash
+# Example: scripts/attach_detach_all.sh
+
+#!/bin/bash
+TARGET_VM="$1"
+export TARGET_VM
+
+/usr/local/libvirt/user/attach_my_gpu.sh
+/usr/local/libvirt/user/attach_my_usb_controller.sh
+```
+
+#### 4. Deploy
+Run the deploy script with `sudo` to install the hook and copy the scripts.
+```bash
+sudo ./deploy.sh
+```
+The passthrough will now be automated on every VM start.
+
+## Debugging
+- **`/var/log/qemu_hook.log`**: Log for the main hook script. Check for errors in hook execution.
+- **`/var/log/attach_detach_pci_from_vm.log`**: Detailed log for the device attachment process. Check for `virsh` or device binding errors.
+
+---
+
+## Appendix: AMD iGPU Passthrough Notes
+
+#### IOMMU group aren't well-separated
+You can try enabling the ACS option in the BIOS, this usually resolves the issue.
+
+But if you're using an AMD Zen 3 CPU with an older chipset (e.g. B350 or B450 motherboard), you may encounter an issue:
+The ACS option may be deprecated for newer CPUs due to BIOS storage limitations
+AM4 motherboards support up to five generations of CPUs (AMD YES!). To make this possible, some rarely used features had to be sacrificed. So if you unfortunately find that the ACS option is missing, downgrading the BIOS may help.
+
+Take me for example — I'm using AMD Ryzen 3 5350GE with an ASRock B450M Pro4 motherboard, and there's no ACS option in the BIOS. After doing some research online, I found this thread: https://www.reddit.com/r/ASRock/comments/pfza16/deskmini_x300_bios_with_acs_enable/
+It mentioned that there's a BIOS version for Asrock B450F which supports well-separated IOMMU groups! After trying B450M BIOS with the same AGESA version(1.2.0.6b), it works as well!
+(Note: This BIOS version still doesn't include the ACS option, but it enables well-separated groups using the PCI ARI option instead.)
 
 In conclusion, if you're using a different motherboard and run into the same issue, try flashing a BIOS with the same AGESA version above. If that still doesn't work... well, it's time to email the vendor and ask for it😅
 
-#### 4. Passthrough PCI device to VM
+#### ROM File (vBIOS)
+Passing through an AMD iGPU often requires a vBIOS ROM file to ensure the guest VM can initialize the GPU correctly and to mitigate the "AMD Reset Bug."
+To extract the ROM, use the `vbios` executable provided in the `utils` directory.
+1.  Navigate to the repository's root directory.
+2.  Run the tool. It will create a ROM file in the same directory (e.g., `vbios_xxxx.bin`).
+    ```bash
+    ./utils/vbios
+    ```
+3.  Move this file to `/usr/local/libvirt/user/` and set the `ROM` variable in your script accordingly.
 
+#### Audio Passthrough for Stability (Error 43 Fix)
+A common issue with AMD APU passthrough is a failure (often "Error 43" in Windows) if the integrated audio device is not also passed through. This is a known requirement for many Ryzen APUs.
+- **Action**: You must create a **separate `.sh` script** for the iGPU's audio device, just as you did for the iGPU itself.
+- **Configuration**: Edit the script with the audio device's `ADDRESS`, `VENDOR`, and `PRODUCT` IDs. The `ROM` variable can typically be left empty.
+- **Enablement**: Remember to add a call to this new audio device script in `attach_detach_all.sh`.
 
+For more technical details, refer to this [GitHub Gist comment](https://gist.github.com/matt22207/bb1ba1811a08a715e32f106450b0418a?permalink_comment_id=4955044#gistcomment-4955044) and the guide at [ryzen-gpu-passthrough-proxmox](https://github.com/isc30/ryzen-gpu-passthrough-proxmox).
