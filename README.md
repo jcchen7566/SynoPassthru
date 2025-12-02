@@ -107,7 +107,7 @@ For each PCI device you want to passthrough, create a `.sh` file in the `scripts
 ADDRESS="08:00.0"
 VENDOR="1002"
 PRODUCT="1638"
-ROM="/usr/local/libvirt/user/vbios_1002_1638.bin"
+ROM="vbios_1002_1638.bin"
 VM_NAME="my-vm-name-from-virsh"
 export VM_NAME
 

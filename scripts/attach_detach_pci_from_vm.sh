@@ -36,7 +36,7 @@ for ADDRESS in "${ADDRESSES[@]}"; do
     if [ -z $ROM ]; then
         sed -i "s|\[ROM\]||g" /usr/local/libvirt/$ADDRESS.xml
     else
-        sed -i "s|\[ROM\]|<rom file='$ROM'/>|g" /usr/local/libvirt/$ADDRESS.xml
+        sed -i "s|\[ROM\]|<rom file='/usr/local/libvirt/user/$ROM'/>|g" /usr/local/libvirt/$ADDRESS.xml
     fi
 
     if [ $OP == "ATTACH" ]; then

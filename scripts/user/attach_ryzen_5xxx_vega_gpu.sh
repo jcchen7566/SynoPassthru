@@ -4,7 +4,7 @@
 ADDRESS="08:00.0" # Remain empty to attach/detach to all VENDOR:PRODUCT devices
 VENDOR="1002"
 PRODUCT="1638"
-ROM="/usr/local/libvirt/user/vbios_1002_1638.bin"
+ROM="vbios_1002_1638.bin"
 
 # The VM you want to attach or detach (from "virsh list")
 VM_NAME="591328d9-88d5-42aa-9551-bb793c3330cf"
